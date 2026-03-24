@@ -1,29 +1,48 @@
 {
   "expo": {
-    "name": "openclaw-ios-app",
-    "slug": "openclaw-ios-app",
+    "name": "TurfWar",
+    "slug": "turfwar",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#0a1929"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "TurfWar needs your location to show the map and track your runs so you can capture territory.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "TurfWar uses your location in the background to track your run and capture territory even when the app is minimized."
+      },
+      "config": {
+        "googleMapsApiKey": ""
+      }
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#0a1929",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
-      }
+      },
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "TurfWar uses your location to track runs and capture territory."
+        }
+      ]
+    ]
   }
 }
