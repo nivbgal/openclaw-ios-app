@@ -2,8 +2,13 @@ import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { View, StyleSheet, Alert, ActivityIndicator } from 'react-native';
 import MapView, { PROVIDER_DEFAULT, Polyline, Polygon } from 'react-native-maps';
 import * as Location from 'expo-location';
+
 import StartRunButton from '../components/StartRunButton';
+import RunStatsOverlay from '../components/RunStatsOverlay';
 import { coordToCell, cellToPolygon, visibleCells } from '../utils/grid';
+import { haversine, totalDistance, metersToCoins } from '../utils/distance';
+import { captureCell, fetchAllTerritory } from '../services/territory';
+import { saveSweatCoins } from '../services/user';
 
 // ---------- dark map style ----------
 const DARK_MAP_STYLE = [
@@ -83,7 +88,6 @@ const DEFAULT_REGION = {
 export default function HomeScreen() {
   // Map state
   const [region, setRegion] = useState(null);
-  const [currentRegion, setCurrentRegion] = useState(null);
   const [loading, setLoading] = useState(true);
   const mapRef = useRef(null);
 
@@ -94,11 +98,31 @@ export default function HomeScreen() {
   // Trail (array of {latitude, longitude})
   const [trail, setTrail] = useState([]);
 
-  // Captured cells (Set stored as object for fast lookup, rendered from keys)
+  // Live distance + coins (computed incrementally for perf)
+  const [distanceM, setDistanceM] = useState(0);
+  const lastPoint = useRef(null);
+
+  // Captured cells — local state mirrors Firestore
+  // { cellKey: { ownerId, teamColor } }
   const [capturedCells, setCapturedCells] = useState({});
 
   // Grid overlay cells for the visible region
   const [gridCells, setGridCells] = useState([]);
+
+  // Queue for Firestore writes (fire-and-forget, batched loosely)
+  const writeQueue = useRef([]);
+  const flushTimer = useRef(null);
+
+  // ---- load existing territory from Firestore on mount ----
+  useEffect(() => {
+    fetchAllTerritory()
+      .then((territory) => {
+        if (Object.keys(territory).length > 0) {
+          setCapturedCells(territory);
+        }
+      })
+      .catch((err) => console.warn('Territory fetch failed:', err));
+  }, []);
 
   // ---- initial location ----
   useEffect(() => {
@@ -127,7 +151,6 @@ export default function HomeScreen() {
           longitudeDelta: 0.005,
         };
         setRegion(initialRegion);
-        setCurrentRegion(initialRegion);
       } catch (error) {
         console.warn('Location error:', error);
         setRegion(DEFAULT_REGION);
@@ -139,46 +162,89 @@ export default function HomeScreen() {
 
   // ---- recompute grid overlay when region changes ----
   const handleRegionChange = useCallback((newRegion) => {
-    setCurrentRegion(newRegion);
     setGridCells(visibleCells(newRegion));
+  }, []);
+
+  // ---- flush Firestore write queue ----
+  const flushWrites = useCallback(() => {
+    const batch = writeQueue.current.splice(0);
+    batch.forEach((cellKey) => {
+      captureCell(cellKey).catch((err) =>
+        console.warn('Firestore write failed:', cellKey, err),
+      );
+    });
   }, []);
 
   // ---- start / stop run ----
   const startRun = useCallback(async () => {
-    // Reset trail for a new run (keep previously captured cells across runs)
     setTrail([]);
+    setDistanceM(0);
+    lastPoint.current = null;
     setIsRunning(true);
 
     locationSub.current = await Location.watchPositionAsync(
       {
         accuracy: Location.Accuracy.BestForNavigation,
-        distanceInterval: 3, // emit every ~3 m of movement
-        timeInterval: 2000, // or every 2 s
+        distanceInterval: 3,
+        timeInterval: 2000,
       },
       (loc) => {
         const { latitude, longitude } = loc.coords;
         const point = { latitude, longitude };
 
+        // Accumulate distance incrementally
+        if (lastPoint.current) {
+          const delta = haversine(lastPoint.current, point);
+          // Filter GPS jitter — ignore jumps < 1 m or > 100 m (teleport)
+          if (delta >= 1 && delta <= 100) {
+            setDistanceM((prev) => prev + delta);
+          }
+        }
+        lastPoint.current = point;
+
         // Append to trail
         setTrail((prev) => [...prev, point]);
 
-        // Check / capture grid cell
+        // Capture grid cell
         const cellKey = coordToCell(latitude, longitude);
         setCapturedCells((prev) => {
           if (prev[cellKey]) return prev; // already captured
-          return { ...prev, [cellKey]: true };
+          // Queue Firestore write
+          writeQueue.current.push(cellKey);
+          // Debounce flush to ~1 s to batch nearby captures
+          if (flushTimer.current) clearTimeout(flushTimer.current);
+          flushTimer.current = setTimeout(flushWrites, 1000);
+
+          return {
+            ...prev,
+            [cellKey]: { ownerId: 'player_001', teamColor: '#00e5ff' },
+          };
         });
       },
     );
-  }, []);
+  }, [flushWrites]);
 
-  const stopRun = useCallback(() => {
+  const stopRun = useCallback(async () => {
     if (locationSub.current) {
       locationSub.current.remove();
       locationSub.current = null;
     }
     setIsRunning(false);
-  }, []);
+
+    // Flush any remaining writes
+    flushWrites();
+
+    // Save Sweat Coins to Firestore
+    setDistanceM((currentDist) => {
+      const coins = metersToCoins(currentDist);
+      if (coins > 0 || currentDist > 0) {
+        saveSweatCoins(coins, Math.round(currentDist)).catch((err) =>
+          console.warn('Failed to save sweat coins:', err),
+        );
+      }
+      return currentDist; // don't change — just read inside setter
+    });
+  }, [flushWrites]);
 
   const handleRunToggle = useCallback(() => {
     if (isRunning) {
@@ -188,14 +254,17 @@ export default function HomeScreen() {
     }
   }, [isRunning, startRun, stopRun]);
 
-  // Clean up subscription on unmount
+  // Clean up on unmount
   useEffect(() => {
     return () => {
-      if (locationSub.current) {
-        locationSub.current.remove();
-      }
+      if (locationSub.current) locationSub.current.remove();
+      if (flushTimer.current) clearTimeout(flushTimer.current);
     };
   }, []);
+
+  // ---- derived values ----
+  const sweatCoins = metersToCoins(distanceM);
+  const capturedKeys = Object.keys(capturedCells);
 
   // ---- render ----
   if (loading) {
@@ -205,8 +274,6 @@ export default function HomeScreen() {
       </View>
     );
   }
-
-  const capturedKeys = Object.keys(capturedCells);
 
   return (
     <View style={styles.container}>
@@ -221,11 +288,9 @@ export default function HomeScreen() {
         userInterfaceStyle="dark"
         onRegionChangeComplete={handleRegionChange}
       >
-        {/* Faint grid overlay */}
+        {/* Faint grid overlay (uncaptured cells only) */}
         {gridCells.map((cellKey) => {
-          const isCaptured = !!capturedCells[cellKey];
-          // Only draw uncaptured cells as faint outlines; captured ones drawn below
-          if (isCaptured) return null;
+          if (capturedCells[cellKey]) return null;
           return (
             <Polygon
               key={`grid-${cellKey}`}
@@ -237,16 +302,33 @@ export default function HomeScreen() {
           );
         })}
 
-        {/* Captured cells */}
-        {capturedKeys.map((cellKey) => (
-          <Polygon
-            key={`cap-${cellKey}`}
-            coordinates={cellToPolygon(cellKey)}
-            strokeColor="rgba(0, 255, 255, 0.6)"
-            fillColor="rgba(0, 255, 255, 0.3)"
-            strokeWidth={1}
-          />
-        ))}
+        {/* Captured cells — colored by team */}
+        {capturedKeys.map((cellKey) => {
+          const cell = capturedCells[cellKey];
+          const color = cell.teamColor || '#00e5ff';
+          // Convert hex to rgba for the fill
+          const hexToRgba = (hex, alpha) => {
+            const r = parseInt(hex.slice(1, 3), 16);
+            const g = parseInt(hex.slice(3, 5), 16);
+            const b = parseInt(hex.slice(5, 7), 16);
+            return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+          };
+          const fill = color.startsWith('#')
+            ? hexToRgba(color, 0.3)
+            : 'rgba(0, 255, 255, 0.3)';
+          const stroke = color.startsWith('#')
+            ? hexToRgba(color, 0.6)
+            : 'rgba(0, 255, 255, 0.6)';
+          return (
+            <Polygon
+              key={`cap-${cellKey}`}
+              coordinates={cellToPolygon(cellKey)}
+              strokeColor={stroke}
+              fillColor={fill}
+              strokeWidth={1}
+            />
+          );
+        })}
 
         {/* Trail polyline */}
         {trail.length >= 2 && (
@@ -258,6 +340,11 @@ export default function HomeScreen() {
           />
         )}
       </MapView>
+
+      {/* Live stats HUD — only during active run */}
+      {isRunning && (
+        <RunStatsOverlay distanceM={distanceM} sweatCoins={sweatCoins} />
+      )}
 
       <StartRunButton onPress={handleRunToggle} isRunning={isRunning} />
     </View>
