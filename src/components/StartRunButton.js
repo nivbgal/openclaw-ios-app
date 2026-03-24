@@ -7,7 +7,7 @@ import {
   View,
 } from 'react-native';
 
-export default function StartRunButton({ onPress }) {
+export default function StartRunButton({ onPress, isRunning = false }) {
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
   const handlePressIn = () => {
@@ -30,14 +30,18 @@ export default function StartRunButton({ onPress }) {
     <View style={styles.wrapper}>
       <Animated.View style={{ transform: [{ scale: scaleAnim }] }}>
         <TouchableOpacity
-          style={styles.button}
+          style={[styles.button, isRunning && styles.buttonStop]}
           onPress={onPress}
           onPressIn={handlePressIn}
           onPressOut={handlePressOut}
           activeOpacity={0.9}
         >
-          <Text style={styles.icon}>▶</Text>
-          <Text style={styles.text}>START RUN</Text>
+          <Text style={[styles.icon, isRunning && styles.iconStop]}>
+            {isRunning ? '■' : '▶'}
+          </Text>
+          <Text style={[styles.text, isRunning && styles.textStop]}>
+            {isRunning ? 'STOP RUN' : 'START RUN'}
+          </Text>
         </TouchableOpacity>
       </Animated.View>
     </View>
@@ -66,16 +70,26 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     elevation: 8,
   },
+  buttonStop: {
+    backgroundColor: '#ff1744',
+    shadowColor: '#ff1744',
+  },
   icon: {
     color: '#0a1929',
     fontSize: 18,
     fontWeight: 'bold',
     marginRight: 10,
   },
+  iconStop: {
+    color: '#fff',
+  },
   text: {
     color: '#0a1929',
     fontSize: 18,
     fontWeight: '800',
     letterSpacing: 2,
+  },
+  textStop: {
+    color: '#fff',
   },
 });
