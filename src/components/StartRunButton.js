@@ -7,10 +7,15 @@ import {
   View,
 } from 'react-native';
 
-export default function StartRunButton({ onPress, isRunning = false }) {
+export default function StartRunButton({
+  onPress,
+  isRunning = false,
+  disabled = false,
+}) {
   const scaleAnim = useRef(new Animated.Value(1)).current;
 
   const handlePressIn = () => {
+    if (disabled) return;
     Animated.spring(scaleAnim, {
       toValue: 0.93,
       useNativeDriver: true,
@@ -18,6 +23,7 @@ export default function StartRunButton({ onPress, isRunning = false }) {
   };
 
   const handlePressOut = () => {
+    if (disabled) return;
     Animated.spring(scaleAnim, {
       toValue: 1,
       friction: 3,
@@ -30,11 +36,16 @@ export default function StartRunButton({ onPress, isRunning = false }) {
     <View style={styles.wrapper}>
       <Animated.View style={{ transform: [{ scale: scaleAnim }] }}>
         <TouchableOpacity
-          style={[styles.button, isRunning && styles.buttonStop]}
+          style={[
+            styles.button,
+            isRunning && styles.buttonStop,
+            disabled && styles.buttonDisabled,
+          ]}
           onPress={onPress}
           onPressIn={handlePressIn}
           onPressOut={handlePressOut}
           activeOpacity={0.9}
+          disabled={disabled}
         >
           <Text style={[styles.icon, isRunning && styles.iconStop]}>
             {isRunning ? '■' : '▶'}
@@ -73,6 +84,9 @@ const styles = StyleSheet.create({
   buttonStop: {
     backgroundColor: '#ff1744',
     shadowColor: '#ff1744',
+  },
+  buttonDisabled: {
+    opacity: 0.55,
   },
   icon: {
     color: '#0a1929',

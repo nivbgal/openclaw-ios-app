@@ -1,0 +1,90 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+
+      allow create: if isOwner(userId)
+        && request.resource.data.keys().hasOnly([
+          'displayName',
+          'teamColor',
+          'sweatCoins',
+          'totalDistanceM',
+          'createdAt',
+          'updatedAt'
+        ])
+        && request.resource.data.displayName is string
+        && request.resource.data.teamColor is string
+        && request.resource.data.sweatCoins == 0
+        && request.resource.data.totalDistanceM == 0;
+
+      allow update, delete: if false;
+    }
+
+    match /push_tokens/{tokenId} {
+      allow read, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+
+      allow create, update: if isSignedIn()
+        && request.resource.data.keys().hasOnly([
+          'userId',
+          'token',
+          'platform',
+          'updatedAt'
+        ])
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.token == tokenId
+        && request.resource.data.platform is string;
+    }
+
+    match /runs/{runId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+
+      allow create: if isSignedIn()
+        && request.resource.data.keys().hasOnly([
+          'userId',
+          'displayName',
+          'teamColor',
+          'distanceM',
+          'earnedCoins',
+          'path',
+          'cellKeys',
+          'startedAt',
+          'completedAt',
+          'status'
+        ])
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.displayName is string
+        && request.resource.data.teamColor is string
+        && request.resource.data.distanceM is int
+        && request.resource.data.earnedCoins is int
+        && request.resource.data.cellKeys is list
+        && request.resource.data.path is list
+        && request.resource.data.status == 'queued';
+
+      allow update, delete: if false;
+    }
+
+    match /captured_territory/{cellId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    match /territory_events/{eventId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

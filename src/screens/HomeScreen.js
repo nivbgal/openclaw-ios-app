@@ -3,14 +3,20 @@ import { View, StyleSheet, Alert, ActivityIndicator } from 'react-native';
 import MapView, { PROVIDER_DEFAULT, Polyline, Polygon } from 'react-native-maps';
 import * as Location from 'expo-location';
 
+import {
+  FIRESTORE_FLUSH_DEBOUNCE_MS,
+  GPS_JITTER_MAX_METERS,
+  GPS_JITTER_MIN_METERS,
+} from '../config/game';
 import StartRunButton from '../components/StartRunButton';
 import RunStatsOverlay from '../components/RunStatsOverlay';
+import { ensureSignedInUser } from '../services/auth';
+import { registerPushTokenAsync } from '../services/notifications';
+import { submitRun } from '../services/runs';
+import { fetchAllTerritory } from '../services/territory';
 import { coordToCell, cellToPolygon, visibleCells } from '../utils/grid';
-import { haversine, totalDistance, metersToCoins } from '../utils/distance';
-import { captureCell, fetchAllTerritory } from '../services/territory';
-import { saveSweatCoins } from '../services/user';
+import { haversine, metersToCoins } from '../utils/distance';
 
-// ---------- dark map style ----------
 const DARK_MAP_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#1d2c4d' }] },
   { elementType: 'labels.text.fill', stylers: [{ color: '#8ec3b9' }] },
@@ -84,49 +90,74 @@ const DEFAULT_REGION = {
   longitudeDelta: 0.01,
 };
 
-// ---------- component ----------
 export default function HomeScreen() {
-  // Map state
   const [region, setRegion] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const mapRef = useRef(null);
+  const [locationLoading, setLocationLoading] = useState(true);
+  const [sessionLoading, setSessionLoading] = useState(true);
+  const [syncingRun, setSyncingRun] = useState(false);
 
-  // Run state
+  const [currentUser, setCurrentUser] = useState(null);
+  const [profile, setProfile] = useState(null);
+
   const [isRunning, setIsRunning] = useState(false);
   const locationSub = useRef(null);
 
-  // Trail (array of {latitude, longitude})
   const [trail, setTrail] = useState([]);
-
-  // Live distance + coins (computed incrementally for perf)
   const [distanceM, setDistanceM] = useState(0);
   const lastPoint = useRef(null);
 
-  // Captured cells — local state mirrors Firestore
-  // { cellKey: { ownerId, teamColor } }
   const [capturedCells, setCapturedCells] = useState({});
-
-  // Grid overlay cells for the visible region
   const [gridCells, setGridCells] = useState([]);
+  const pushRegistrationTimer = useRef(null);
 
-  // Queue for Firestore writes (fire-and-forget, batched loosely)
-  const writeQueue = useRef([]);
-  const flushTimer = useRef(null);
-
-  // ---- load existing territory from Firestore on mount ----
   useEffect(() => {
-    fetchAllTerritory()
-      .then((territory) => {
-        if (Object.keys(territory).length > 0) {
+    let isMounted = true;
+
+    async function bootstrapSession() {
+      try {
+        const { user, profile: nextProfile } = await ensureSignedInUser();
+        if (!isMounted) return;
+
+        setCurrentUser(user);
+        setProfile(nextProfile);
+
+        const territory = await fetchAllTerritory();
+        if (isMounted) {
           setCapturedCells(territory);
         }
-      })
-      .catch((err) => console.warn('Territory fetch failed:', err));
+
+        pushRegistrationTimer.current = setTimeout(() => {
+          registerPushTokenAsync(user.uid).catch((err) =>
+            console.warn('Push registration failed:', err),
+          );
+        }, FIRESTORE_FLUSH_DEBOUNCE_MS);
+      } catch (error) {
+        console.warn('Session bootstrap failed:', error);
+        Alert.alert(
+          'Sign-in failed',
+          'The app could not create a player session. Check Firebase Auth and try again.',
+        );
+      } finally {
+        if (isMounted) {
+          setSessionLoading(false);
+        }
+      }
+    }
+
+    bootstrapSession();
+
+    return () => {
+      isMounted = false;
+      if (pushRegistrationTimer.current) {
+        clearTimeout(pushRegistrationTimer.current);
+      }
+    };
   }, []);
 
-  // ---- initial location ----
   useEffect(() => {
-    (async () => {
+    let isMounted = true;
+
+    async function loadLocation() {
       try {
         const { status } = await Location.requestForegroundPermissionsAsync();
         if (status !== 'granted') {
@@ -135,8 +166,10 @@ export default function HomeScreen() {
             'TurfWar needs your location to show the map around you. Please enable location permissions in Settings.',
             [{ text: 'OK' }],
           );
-          setRegion(DEFAULT_REGION);
-          setLoading(false);
+          if (isMounted) {
+            setRegion(DEFAULT_REGION);
+            setGridCells(visibleCells(DEFAULT_REGION));
+          }
           return;
         }
 
@@ -150,32 +183,35 @@ export default function HomeScreen() {
           latitudeDelta: 0.005,
           longitudeDelta: 0.005,
         };
-        setRegion(initialRegion);
+
+        if (isMounted) {
+          setRegion(initialRegion);
+          setGridCells(visibleCells(initialRegion));
+        }
       } catch (error) {
         console.warn('Location error:', error);
-        setRegion(DEFAULT_REGION);
+        if (isMounted) {
+          setRegion(DEFAULT_REGION);
+          setGridCells(visibleCells(DEFAULT_REGION));
+        }
       } finally {
-        setLoading(false);
+        if (isMounted) {
+          setLocationLoading(false);
+        }
       }
-    })();
+    }
+
+    loadLocation();
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
-  // ---- recompute grid overlay when region changes ----
-  const handleRegionChange = useCallback((newRegion) => {
-    setGridCells(visibleCells(newRegion));
+  const handleRegionChange = useCallback((nextRegion) => {
+    setRegion(nextRegion);
+    setGridCells(visibleCells(nextRegion));
   }, []);
 
-  // ---- flush Firestore write queue ----
-  const flushWrites = useCallback(() => {
-    const batch = writeQueue.current.splice(0);
-    batch.forEach((cellKey) => {
-      captureCell(cellKey).catch((err) =>
-        console.warn('Firestore write failed:', cellKey, err),
-      );
-    });
-  }, []);
-
-  // ---- start / stop run ----
   const startRun = useCallback(async () => {
     setTrail([]);
     setDistanceM(0);
@@ -190,39 +226,35 @@ export default function HomeScreen() {
       },
       (loc) => {
         const { latitude, longitude } = loc.coords;
-        const point = { latitude, longitude };
+        const point = { latitude, longitude, timestamp: loc.timestamp };
 
-        // Accumulate distance incrementally
         if (lastPoint.current) {
           const delta = haversine(lastPoint.current, point);
-          // Filter GPS jitter — ignore jumps < 1 m or > 100 m (teleport)
-          if (delta >= 1 && delta <= 100) {
+          if (delta >= GPS_JITTER_MIN_METERS && delta <= GPS_JITTER_MAX_METERS) {
             setDistanceM((prev) => prev + delta);
           }
         }
         lastPoint.current = point;
 
-        // Append to trail
         setTrail((prev) => [...prev, point]);
 
-        // Capture grid cell
+        if (!currentUser || !profile) return;
+
         const cellKey = coordToCell(latitude, longitude);
         setCapturedCells((prev) => {
-          if (prev[cellKey]) return prev; // already captured
-          // Queue Firestore write
-          writeQueue.current.push(cellKey);
-          // Debounce flush to ~1 s to batch nearby captures
-          if (flushTimer.current) clearTimeout(flushTimer.current);
-          flushTimer.current = setTimeout(flushWrites, 1000);
-
+          if (prev[cellKey]?.ownerId === currentUser.uid) return prev;
           return {
             ...prev,
-            [cellKey]: { ownerId: 'player_001', teamColor: '#00e5ff' },
+            [cellKey]: {
+              ownerId: currentUser.uid,
+              displayName: profile.displayName,
+              teamColor: profile.teamColor,
+            },
           };
         });
       },
     );
-  }, [flushWrites]);
+  }, [currentUser, profile]);
 
   const stopRun = useCallback(async () => {
     if (locationSub.current) {
@@ -231,43 +263,55 @@ export default function HomeScreen() {
     }
     setIsRunning(false);
 
-    // Flush any remaining writes
-    flushWrites();
+    if (!currentUser || !profile || trail.length === 0) {
+      return;
+    }
 
-    // Save Sweat Coins to Firestore
-    setDistanceM((currentDist) => {
-      const coins = metersToCoins(currentDist);
-      if (coins > 0 || currentDist > 0) {
-        saveSweatCoins(coins, Math.round(currentDist)).catch((err) =>
-          console.warn('Failed to save sweat coins:', err),
-        );
-      }
-      return currentDist; // don't change — just read inside setter
-    });
-  }, [flushWrites]);
+    setSyncingRun(true);
+    try {
+      const summary = await submitRun({
+        userId: currentUser.uid,
+        profile,
+        distanceM,
+        trail,
+      });
+
+      Alert.alert(
+        'Run submitted',
+        `${summary.earnedCoins} coins queued. Territory updates will appear after the backend processes the run.`,
+      );
+    } catch (error) {
+      console.warn('Run sync failed:', error);
+      Alert.alert(
+        'Run sync failed',
+        'Your territory changes were not saved. Check Firestore rules and network access.',
+      );
+    } finally {
+      setSyncingRun(false);
+    }
+  }, [currentUser, distanceM, profile, trail]);
 
   const handleRunToggle = useCallback(() => {
+    if (syncingRun) return;
+
     if (isRunning) {
       stopRun();
     } else {
       startRun();
     }
-  }, [isRunning, startRun, stopRun]);
+  }, [isRunning, startRun, stopRun, syncingRun]);
 
-  // Clean up on unmount
   useEffect(() => {
     return () => {
       if (locationSub.current) locationSub.current.remove();
-      if (flushTimer.current) clearTimeout(flushTimer.current);
     };
   }, []);
 
-  // ---- derived values ----
+  const loading = locationLoading || sessionLoading;
   const sweatCoins = metersToCoins(distanceM);
   const capturedKeys = Object.keys(capturedCells);
 
-  // ---- render ----
-  if (loading) {
+  if (loading || !region) {
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color="#00e5ff" />
@@ -278,7 +322,6 @@ export default function HomeScreen() {
   return (
     <View style={styles.container}>
       <MapView
-        ref={mapRef}
         style={styles.map}
         provider={PROVIDER_DEFAULT}
         initialRegion={region}
@@ -288,7 +331,6 @@ export default function HomeScreen() {
         userInterfaceStyle="dark"
         onRegionChangeComplete={handleRegionChange}
       >
-        {/* Faint grid overlay (uncaptured cells only) */}
         {gridCells.map((cellKey) => {
           if (capturedCells[cellKey]) return null;
           return (
@@ -302,23 +344,23 @@ export default function HomeScreen() {
           );
         })}
 
-        {/* Captured cells — colored by team */}
         {capturedKeys.map((cellKey) => {
           const cell = capturedCells[cellKey];
           const color = cell.teamColor || '#00e5ff';
-          // Convert hex to rgba for the fill
           const hexToRgba = (hex, alpha) => {
             const r = parseInt(hex.slice(1, 3), 16);
             const g = parseInt(hex.slice(3, 5), 16);
             const b = parseInt(hex.slice(5, 7), 16);
             return `rgba(${r}, ${g}, ${b}, ${alpha})`;
           };
+
           const fill = color.startsWith('#')
             ? hexToRgba(color, 0.3)
             : 'rgba(0, 255, 255, 0.3)';
           const stroke = color.startsWith('#')
             ? hexToRgba(color, 0.6)
             : 'rgba(0, 255, 255, 0.6)';
+
           return (
             <Polygon
               key={`cap-${cellKey}`}
@@ -330,7 +372,6 @@ export default function HomeScreen() {
           );
         })}
 
-        {/* Trail polyline */}
         {trail.length >= 2 && (
           <Polyline
             coordinates={trail}
@@ -341,12 +382,15 @@ export default function HomeScreen() {
         )}
       </MapView>
 
-      {/* Live stats HUD — only during active run */}
       {isRunning && (
         <RunStatsOverlay distanceM={distanceM} sweatCoins={sweatCoins} />
       )}
 
-      <StartRunButton onPress={handleRunToggle} isRunning={isRunning} />
+      <StartRunButton
+        onPress={handleRunToggle}
+        isRunning={isRunning}
+        disabled={syncingRun || !currentUser || !profile}
+      />
     </View>
   );
 }

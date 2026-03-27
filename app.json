@@ -38,6 +38,12 @@
     },
     "plugins": [
       [
+        "expo-notifications",
+        {
+          "enableBackgroundRemoteNotifications": true
+        }
+      ],
+      [
         "expo-location",
         {
           "locationAlwaysAndWhenInUsePermission": "TurfWar uses your location to track runs and capture territory."

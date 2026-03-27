@@ -1,19 +1,33 @@
 /**
  * Firebase initialisation — pure JS SDK (works in Expo Go, no native modules).
  */
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { initializeApp } from 'firebase/app';
+import { initializeAuth } from 'firebase/auth';
+import { getReactNativePersistence } from 'firebase/auth/react-native';
 import { getFirestore } from 'firebase/firestore';
 
+function requireEnv(name) {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`Missing required Firebase env var: ${name}`);
+  }
+  return value;
+}
+
 const firebaseConfig = {
-  apiKey: 'AIzaSyAHcV9xe270WYJ5CttfcOU1rM0wrwrLOB8',
-  authDomain: 'turfwar-7be0b.firebaseapp.com',
-  projectId: 'turfwar-7be0b',
-  storageBucket: 'turfwar-7be0b.firebasestorage.app',
-  messagingSenderId: '953533143496',
-  appId: '1:953533143496:web:dfd4f2bc767746e77288fd',
+  apiKey: requireEnv('EXPO_PUBLIC_FIREBASE_API_KEY'),
+  authDomain: requireEnv('EXPO_PUBLIC_FIREBASE_AUTH_DOMAIN'),
+  projectId: requireEnv('EXPO_PUBLIC_FIREBASE_PROJECT_ID'),
+  storageBucket: requireEnv('EXPO_PUBLIC_FIREBASE_STORAGE_BUCKET'),
+  messagingSenderId: requireEnv('EXPO_PUBLIC_FIREBASE_MESSAGING_SENDER_ID'),
+  appId: requireEnv('EXPO_PUBLIC_FIREBASE_APP_ID'),
 };
 
 const app = initializeApp(firebaseConfig);
+const auth = initializeAuth(app, {
+  persistence: getReactNativePersistence(AsyncStorage),
+});
 const db = getFirestore(app);
 
-export { app, db };
+export { app, auth, db };
