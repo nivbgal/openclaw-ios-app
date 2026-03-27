@@ -133,9 +133,11 @@ export default function HomeScreen() {
         }, FIRESTORE_FLUSH_DEBOUNCE_MS);
       } catch (error) {
         console.warn('Session bootstrap failed:', error);
+        const details = [error?.code, error?.message].filter(Boolean).join('\n');
         Alert.alert(
           'Sign-in failed',
-          'The app could not create a player session. Check Firebase Auth and try again.',
+          details ||
+            'The app could not create a player session. Check Firebase Auth and try again.',
         );
       } finally {
         if (isMounted) {
